@@ -1,0 +1,281 @@
+Trie树又名字典树，一般用于单词查找，通过子结点不同匹配不同的路径，可以极大地减少匹配次数。提高查找效率，常见的应用场景有脏词过滤。
+
+以下代码主要实现2部分功能:
+  1. 构建匹配词库，主要实现在AddMatchString函数中。比如: 收集所有脏词.
+  2. 匹配,  实际应用在一般有两种情况。
+      a) 查询用户的输入是否存在脏词，如果条件成立，就立即返回，不再进行脏词替换了。 主要实现在 Match函数中
+      b）在a的基础上，屏幕匹配到的脏词。 主要实现在 Transform函数中。
+      匹配核心实现在 MatchString函数中。主要分2步实现:
+      a) 逐个遍历输入的字符串
+      b) 从trie树的根开始进行搜索，如果匹配，继续搜索直到脏词结束，同时统计匹配到的脏词个数，并根据回调函数，对脏词做处理，
+         如果不匹配，继续 a), 直至字符串遍历完成。
+      
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <algorithm>
+#include <vector>
+#include <string>
+#include <iostream>
+#include <locale.h>
+#include <string.h>
+#include <wchar.h>
+
+using namespace std;
+
+
+class TrieTreeChild
+{
+public:
+        TrieTreeChild(wchar_t input_char):
+                current_char_(input_char),
+                is_leaf_(false)
+        {
+        }
+
+        TrieTreeChild& AddChild(wchar_t input_char, bool finished)
+        {
+                TrieTreeChild tchild(input_char);
+                std::vector<TrieTreeChild>::iterator it = std::lower_bound(children_.begin(), children_.end(), input_char);
+
+                if (it == children_.end() || it->current_char_ != input_char)
+                {
+                        int distance = std::distance(children_.begin(), it);
+                        children_.insert(it, tchild);
+                        it = children_.begin();
+                        std::advance(it, distance);
+                }
+                if (finished)
+                {
+                        it->is_leaf_ = finished;
+                }
+                return *it;
+        }
+
+        TrieTreeChild* GetChild(wchar_t input_char)
+        {
+                std::vector<TrieTreeChild>::iterator it = std::lower_bound(children_.begin(), children_.end(), input_char);
+                if (it == children_.end() || it->current_char_ != input_char)
+                {
+                        return NULL;
+                }
+                return &*it;
+        }
+
+        bool operator == (const TrieTreeChild& node) const
+        {
+                return node.current_char_ == this->current_char_;
+        }
+
+        bool operator < (const TrieTreeChild& node) const
+        {
+                return this->current_char_ < node.current_char_;
+        }
+
+        bool IsLeaf() const
+        {
+                return is_leaf_;
+        }
+
+        void Reset()
+        {
+                current_char_ = wchar_t();
+                is_leaf_ = false;
+                children_.clear();
+        }
+
+private:
+        vector<TrieTreeChild> children_;
+        wchar_t current_char_;
+        bool is_leaf_;
+};
+
+class TrieTree
+{
+private:
+        typedef bool (*CallbackPtr)(wchar_t*, size_t, wchar_t);
+
+public:
+        TrieTree():
+                root_(0),
+                need_set_locale_(true)
+        {
+                std::string locale = setlocale(LC_ALL, "en_US.utf8");
+                std::transform(locale.begin(), locale.end(), locale.begin(), ::tolower);
+                if (locale.find("utf8") != std::string::npos || locale.find("utf-8") != std::string::npos)
+                {
+                        need_set_locale_ = false;
+                        setlocale(LC_ALL, locale.c_str());
+                }
+        }
+
+        void AddMatchString(const char *s)
+        {
+                char *old_locale = NULL;
+                if (need_set_locale_)
+                {
+                        old_locale = setlocale(LC_ALL, "en_US.utf8");
+                }
+
+                size_t str_len = strlen(s);
+                wchar_t wstr[str_len+1];
+                size_t wstr_len = str_len;
+                wstr[wstr_len] = 0;
+
+                //step 1: convert to wchar
+                ConvertToWString(s, str_len, wstr, wstr_len);
+                //step 2: transform to lower wchar
+                std::transform(wstr, wstr+wstr_len, wstr, ::tolower);
+                //step 3: add match string
+                AddMatchString(wstr, wstr_len);
+
+                //restore old locale
+                if (need_set_locale_)
+                {
+                        setlocale(LC_ALL, old_locale);
+                }
+        }
+
+        void AddMatchString(const wchar_t *ws, size_t len)
+        {
+                TrieTreeChild *node = &root_;
+                for (size_t i = 0; i<len; ++i)
+                {
+                        node = &(node->AddChild(ws[i], i == (len-1)));
+                }
+        }
+
+        void Clear()
+        {
+                root_.Reset();
+        }
+
+        bool Match(const char *s)
+        {
+                char *old_locale = NULL;
+                if (need_set_locale_)
+                {
+                        old_locale = setlocale(LC_ALL, "en_US.utf8");
+                }
+
+                size_t slen = strlen(s);
+                size_t wlen = slen;
+                wchar_t ws[slen+1];
+                ws[slen] = 0;
+                ConvertToWString(s, slen, ws, wlen);
+                std::transform(ws, ws+wlen, ws, ::tolower);
+                bool result = MatchString(ws, wlen, &TrieTree::Break, L'*');
+
+                if (need_set_locale_)
+                {
+                        setlocale(LC_ALL, old_locale);
+                }
+                return result;
+        }
+
+        bool Transform(char *s, wchar_t mask=L'*')
+        {
+                char *old_locale = NULL;
+                if (need_set_locale_)
+                {
+                        old_locale = setlocale(LC_ALL, "en_US.utf8");
+                }
+
+                size_t slen = strlen(s);
+                size_t wlen = slen;
+                wchar_t ws[slen+1];
+                ws[slen] = 0;
+                ConvertToWString(s, slen, ws, wlen);
+                std::transform(ws, ws+wlen, ws, ::tolower);
+                bool result = MatchString(ws, wlen, &TrieTree::Replace, mask);
+                if (result)
+                {
+                        ConvertToCString(ws, wlen, s, slen);
+                }
+
+                if (need_set_locale_)
+                {
+                        setlocale(LC_ALL, old_locale);
+                }
+                return result;
+        }
+
+        size_t MatchString(wchar_t *ws, size_t wlen, CallbackPtr cb, wchar_t mask)
+        {
+                size_t match_count = 0;
+
+                for (size_t i = 0; i<wlen; ++i)
+                {
+                        int depth = 0;
+                        wchar_t *ws_begin = ws + i;
+                        TrieTreeChild *node = &root_;
+
+                        while (node != NULL)
+                        {
+                                node = node->GetChild(ws_begin[depth]);
+                                depth = (node != NULL) ? depth+1 : 0;
+                                if (node && node->IsLeaf())
+                                {
+                                        ++match_count;
+                                        //replace matched string with mask
+                                        bool need_break = (*cb)(ws_begin, depth, mask);
+                                        if (need_break) {
+                                                return match_count;
+                                        }
+                                }
+                        }
+                }
+                return match_count;
+        }
+
+
+
+        void ConvertToWString(const char *s, size_t slen, wchar_t *ws, size_t& wlen)
+        {
+                (void)slen;
+                wlen = mbstowcs(ws, s, wlen);
+        }
+
+        void ConvertToCString(const wchar_t *ws, size_t wlen, char *s, size_t& slen)
+        {
+                (void)wlen;
+                slen = wcstombs(s, ws, slen);
+        }
+
+        static bool Break(wchar_t *wstr, size_t wlen, wchar_t mask)
+        {
+                return true;
+        }
+
+        static bool Replace(wchar_t *wstr, size_t wlen, wchar_t mask)
+        {
+                for (size_t i = 0; i<wlen; ++i)
+                {
+                        wstr[i] = mask;
+                }
+                return false;
+        }
+
+private:
+
+
+        TrieTreeChild root_;
+        bool need_set_locale_;
+};
+
+int main(int argc, char **argv)
+{
+        TrieTree tree;
+        tree.AddMatchString("fuck");
+        tree.AddMatchString("shit");
+
+        char input[] = "oh,what the fuck thing, shit!";
+        std::cout << tree.Match(input) << endl;
+        std::cout << tree.Transform(input) << endl;
+        std::cout << input << endl;
+        exit(0);
+}
