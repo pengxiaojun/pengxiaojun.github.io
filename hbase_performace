@@ -1,0 +1,60 @@
+
+  Hbase读的性能比较强，官方定义为适合PB级数据的秒级查询，就是说在巨海量的数据中查询，响应速度非常快。写的速度和程序员及硬件的关系较大，具体如下：    在此之前，请检查硬件状况。硬盘推荐SSD，一般SATA即可。网络千兆以上。可以安装Ganglia等工具，检查各节点的各硬件的运作状态：CPU,Memo,网络等等。一、调整参数    入门级的调优可以从调整参数开始。投入小，回报快。
+  1. Write Buffer Size快速配置
+  Java代码 
+  HTable htable = new HTable(config, tablename); 
+  htable.setWriteBufferSize(6 * 1024 * 1024);  
+  htable.setAutoFlush(false);     
+  设置buffer的容量，例子中设置了6MB的buffer容量。* 必须禁止auto flush。* 6MB是经验值，可以上下微调以适应不同的写场景。
+  原理HBase Client会在数据累积到设置的阈值后才提交Region Server。这样做的好处在于可以减少RPC连接次数。同时，我们得计算一下服务端因此而消耗的内存：hbase.client.write.buffer * hbase.regionserver.handler.count。在减少PRC次数和增加服务器端内存之间找到平衡点。
+  
+  2. RPC Handler快速配置修改hbase-site.xml的hbase.regionserver.handler.count
+  配置项：Xml代码 
+  <property>  
+  <name>hbase.regionserver.handler.count</name> 
+  <value>100</value>
+  </property>  
+  原理该配置定义了每个Region Server上的RPC Handler的数量。Region Server通过RPC Handler接收外部请求并加以处理。所以提升RPC Handler的数量可以一定程度上提高HBase接收请求的能力。当然，handler数量也不是越大越好，这要取决于节点的硬件情况。
+  
+  3. Compression 压缩快速配置
+  Java代码  
+  HColumnDescriptor hcd = new HColumnDescriptor(familyName);   
+  hcd.setCompressionType(Algorithm.SNAPPY); 
+  原理数据量大，边压边写也会提升性能的，毕竟IO是大数据的最严重的瓶颈，哪怕使用了SSD也是一样。众多的压缩方式中，推荐使用SNAPPY。
+  从压缩率和压缩速度来看，性价比最高。
+ 
+ 4. WAL快速配置
+  Java代码  
+  Put put = new Put(rowKey);  
+  put.setWriteToWAL(false); 
+  原理其实不推荐关闭WAL，不过关了的确可以提升性能...因为HBase在写数据前会先写WAL，以保证在异常情况下，HBase可以按照WAL的记录来恢复还未持久化的数据。
+  
+  5. Replication虽然推荐replica=3，不过当数据量很夸张的时候，一般会把replica降低到2。当然也不推荐随便降低replica。
+  
+  6. Compaction在插数据时，打开HMaster的web界面，查看每个region server的request数量。确保大部分时间，写请求在region server层面大致平均分布。在此前提下，我们再考虑compaction的问题。继续观察request数量，你会发现在某个时间段，若干region server接收的请求数为0（当然这也可能是client根本没有向这个region server写数据，所以之前说，要确保请求在各region server大致平均分布）。这很有可能是region server在做compaction导致。compaction的过程会block写。优化的思路有两种，一是提高compaction的效率，二是减少compaction发生的频率。提高以下两个属性的值，以增加执行compaction的线程数：
+  Xml代码  
+  hbase.regionserver.thread.compaction.large
+  hbase.regionserver.thread.compaction.small   推荐设置为2。
+  
+  7. 减少Region Split次数region split是提升写性能的一大障碍。减少region split次数可以从两方面入手，
+  一是预分配region(该内容会在下章节表设计优化里详述)。
+  其二是适当提升hbase.hregion.max.filesize提升region的file容量也可以减少split的次数。具体的值需要按照你的数据量，region数量，row key分布等情况具体考量。一般来说，3~4G是不错的选择。
+  
+  8. HFile format version0.92.0后的version都应该是2。v2比v1支持更大的region大小。一般经验是Region越大越少，性能更好(当然也不能过分大，否则major compaction的时候时间长的吃不消)。所以推荐把hfile.format.version改成2，并提高hfile大小。对于使用v1 format的用户，不用担心，数据迁移到v2上是有工具的。具体参见HBASE-1621。
+  
+  9. hbase.ipc.client.tcpnodelay设置成True。关闭Nagle，可能提高latency。当然HDFS也关掉TPC Nagle。A TCP/IP optimization called the Nagle Algorithm can also limit data transfer speed on a connection. The Nagle Algorithm is designed to reduce protocol overhead for applications that send small amounts of data, such as Telnet, which sends a single character at a time. Rather than immediately send a packet with lots of header and little data, the stack waits for more data from the application, or an acknowledgment, before proceeding.
+  
+  二、表设计优化
+  1. 预分配Region之前有说防止region split的两大手段其中之一就是预分配region。在此不重复region split的原理，请参见HBase自动分区(Auto-Sharding)_学步。按数据量，row key的规则预先设计并分配好region，可以大幅降低region split的次数, 甚至不split。这点非常重要。
+  2. Column Family的数量实测发现column family的数量对性能会有直接影响。建议减少column family的数量。单个cf是最好
+  3. Column Family MAX_VERSIONS/MAX_LENGTH前者确定保存一个cell的最大历史份数，后者确定多少byte可以存进一个cell 历史记录。所以我们可以减低这些值。
+  4. Row Key的设计Region的数据边界是start key和end key。如果记录的row key落在某个region的start key和end key的范围之内，该数据就会存储到这个region上。在写数据的时候，尤其是导入客户原有数据的时候，如果row key设计不当，很可能导致性能问题。之前我们也介绍了row key和region的关系。如果在某个时段内，很多数据的row key都处在某个特定的row key范围内。那这个特定范围row key对应的region会非常繁忙，而其他的region很可能非常的空闲，导致资源浪费。那么，如何设计row key呢？举个比较实际的例子，如果有张HBase表来记录每天某城市的通话记录， 常规思路下的row key是由电话号码 + yyyyMMddHHmmSS(通话开始时间) + ... 组成。按电话号码的规律来划分region。但是这样很容易导致某时段row key极其不均匀(因为电话通话呈随机性)。但是，如果把电话号码倒序，数据在region层面的分布情况就大有改观。设计row key的方法千变万化，宗旨只有一条，尽量保证单位时间内写入数据的row key对于region呈均匀分布。
+  
+  三、优化Client设计实践发现，写性能差大部分情况是源于Client端的糟糕设计。接下来分享一些Client设计的思路。
+  1. 均匀分布每个Region Server的写压力之前也提到了RPC Handler的概念。好的Data Loader需要保证每个RPC Handlder都有活干，每个handler忙，但不至超载。注意region的压力不能过大，否则会导致反复重试，并伴有超时异常(可以提高超时的时间设置)。如何保证每个Region Server的压力均衡呢？这和region 数量，row key的设计 和client数据的插入顺序有关。设计者需要根据用户数据的情况，集群情况来综合考虑。
+  
+  2. 并行的数据插入框架多线程是最简单的解决方案。要点是让每个线程负责一部分的row key范围，而row key范围又和region相关，所以可以在数据插入时，程序控制每个region的压力，不至于有些region闲着没事干。由于相对简单，不再赘述。即使使用多线程，也受限于单节点的硬件资源，写入速度不可能很快。典型的思路是将客户端部署在多个节点上运行，提高写的并发度。MapReduce是个很好的选择。使用MapReduce把写入程序分布到集群的各个节点上，并在每个mapper中运行多线程的插入程序。这样可以很好的提高写并发度。注意，不要使用reducer。mapper到reducer需要走网络，受限于集群带宽。其次，实际的应用场景一般是用户从关系型数据库中导出了文本类型的数据，然后希望能把导出的数据写到HBase里。在这种情况下，需要小心谨慎地设计和实现FileInputFormat的file split逻辑。
+  
+  3. BulkLoad请拿出HBase的API读读，HFileOutputFomart里有个叫configureIncrementalLoad的方法。API是这么介绍的：Configure a MapReduce Job to perform an incremental load into the given table. ThisInspects the table to configure a total order partitionerUploads the partitions file to the cluster and adds it to the DistributedCacheSets the number of reduce tasks to match the current number of regionsSets the output key/value class to match HFileOutputFormat's requirementsSets the reducer up to perform the appropriate sorting (either KeyValueSortReducer or PutSortReducer)The user should be sure to set the map output value class to either KeyValue or Put before running this function.这是HBase提供的一种基于MapReduce的数据导入方案，完美地绕过了HBase Client（上一节的分布式插入方法也是用mapreduce实现的，不过本质上还是用hbase client来写数据） 网上有不少文章叙述了使用命令行方式运行BulkLoad，google一下你就知道... 但是，不得不说，实际生产环境上很难使用这种方式。毕竟源数据不可能直接用来写HBase。在数据迁移的过程中会涉及到数据清洗、整理归并等许多额外的工作。这显然不是命令行可以做到的事情。按照API的描述， 可行的方案是自定义一个Mapper在mapper中清洗数据，Mapper的输出value为HBase的Put类型，Reducer选用PutSortReducer。然后使用HFileOutputFormat#configureIncrementalLoad(Job, HTable);解决剩余工作。不过，这种实现也存在局限性。毕竟Mapper到Reducer比较吃网络。
+  
+  四、写在后面的话至此，介绍了三种HBase数据写入的方法（1种多线程，2种mapreduce），并介绍了各类性能调优的方法。希望有所帮助。如果有大家有更好的方法，不妨留言讨论，共同进步。
