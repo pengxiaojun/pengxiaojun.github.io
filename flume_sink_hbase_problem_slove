@@ -1,0 +1,74 @@
+[TOC]
+
+# flume sink to hbase 
+
+## flume配置 flume-hbase.conf
+```
+a4.sources = r1
+a4.sinks = k1
+a4.channels = c1
+
+
+a4.sources.r1.type = exec
+a4.sources.r1.channels = c1
+a4.sources.r1.command = tail -F /root/biz.log
+
+a4.sinks.k1.type = hbase
+a4.sinks.k1.channel = c1
+a4.sinks.k1.table = flume
+a4.sinks.k1.columnFamily = cf
+a4.sinks.k1.serializer = org.apache.flume.sink.hbase.RegexHbaseEventSerializer
+a4.sinks.k1.zookeeperQuorum = hdh134:2181
+a4.sinsk.k1.znodeParent = /hbase
+
+a4.channels.c1.type = memory
+a4.channels.c1.capacity = 100000
+a4.channels.c1.transactionCapacity = 1000
+
+```
+
+## flume-env.sh
+```
+export JAVA_HOME=/usr/java/jdk1.8.0_101
+export HADOOP_HOME=/root/hadoop 
+```
+说明: flume的sink为HbaseSink, 这里要配置hadoop环境
+
+## problems
+
+```
+flume-ng agent --conf conf -f conf/flume-hbase.conf -n a4 -Dflume.root.logger=INFO,console
+```
+### 出现hadoop中Configuration class not found错误
+解决方法:
+复制hadoop包至flume agent所有的机器上,并配置HADOOP_HOME环境变量至flume-env.sh, 该文件会在flume启动时自动执行.
+```
+/root/hadoop目录为hadoop安装目录
+只需要包含以下三个必要的目录进来即可
+bin
+libexec
+share
+```
+
+
+### 出现hbase中的class not found错误
+解决方法:  把hadoop中hbase下的lib拷贝过来,根据需要copy
+```
+lib/hadoop-common-2.6.0-cdh5.7.0.jar              lib/hbase-hadoop-compat-1.2.0-cdh5.7.0.jar    lib/hbase-server-1.2.0-cdh5.7.0-tests.jar
+lib/hbase-annotations-1.2.0-cdh5.7.0.jar          lib/hbase-it-1.2.0-cdh5.7.0.jar               lib/hbase-shell-1.2.0-cdh5.7.0.jar
+lib/hbase-annotations-1.2.0-cdh5.7.0-tests.jar    lib/hbase-it-1.2.0-cdh5.7.0-tests.jar         lib/hbase-spark-1.2.0-cdh5.7.0.jar
+lib/hbase-client-1.2.0-cdh5.7.0.jar               lib/hbase-prefix-tree-1.2.0-cdh5.7.0.jar      lib/hbase-thrift-1.2.0-cdh5.7.0.jar
+lib/hbase-common-1.2.0-cdh5.7.0.jar               lib/hbase-procedure-1.2.0-cdh5.7.0.jar        lib/htrace-core-3.2.0-incubating.jar
+lib/hbase-common-1.2.0-cdh5.7.0-tests.jar         lib/hbase-protocol-1.2.0-cdh5.7.0.jar         lib/htrace-core4-4.0.1-incubating.jar
+lib/hbase-examples-1.2.0-cdh5.7.0.jar             lib/hbase-resource-bundle-1.2.0-cdh5.7.0.jar  lib/httpclient-4.2.1.jar
+lib/hbase-external-blockcache-1.2.0-cdh5.7.0.jar  lib/hbase-rest-1.2.0-cdh5.7.0.jar             lib/httpcore-4.1.3.jar
+lib/hbase-hadoop2-compat-1.2.0-cdh5.7.0.jar       lib/hbase-server-1.2.0-cdh5.7.0.jar
+```
+
+
+### 出现netty看 class not found错误
+解决方法: 用hbase下的netty-all-4.0.23.Final.jar替换flume/lib下的 netty-3.5.12.Final.jar即可.
+
+##总结
+依赖关系有些复杂, 而且jar版本还得考虑
+
